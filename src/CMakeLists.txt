@@ -3,6 +3,6 @@
 add_executable (jpeg-dissect 
 	"main.c"
 	"loader.c"
-)
+ )
 
 set_property(TARGET jpeg-dissect PROPERTY C_STANDARD 11)

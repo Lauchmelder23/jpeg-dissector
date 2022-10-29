@@ -4,10 +4,13 @@
 #include <memory.h>
 #include <assert.h>
 
+#define MAX_QUANTIZATION_TABLES 255
+
 #define memzero(buffer, size) memset(buffer, 0, size)
 
 static int load_segment(JPEG* jpeg, FILE* fp);
 
+static int load_quantization_table(JPEG* jpeg, FILE* fp);
 static int load_rst_segment(JPEG* jpeg, FILE* fp, uint8_t n);
 static int load_app_segment(JPEG* jpeg, FILE* fp, uint8_t n);
 
@@ -15,7 +18,7 @@ static int load_app0_segment(JPEG* jpeg, FILE* fp);
 
 JPEG* load_jpeg(const char* filename)
 {
-	FILE* fp = fopen(filename, "r");
+	FILE* fp = fopen(filename, "r+b");
 	if (fp == NULL)
 	{
 		return NULL;
@@ -49,9 +52,23 @@ void free_jpeg(JPEG* jpeg)
 		if (jpeg->app0->thumbnail_data)
 		{
 			free(jpeg->app0->thumbnail_data);
+			jpeg->app0->thumbnail_data = NULL;
 		}
 
 		free(jpeg->app0);
+		jpeg->app0 = NULL;
+	}
+
+	if (jpeg->quantization_tables)
+	{
+		for (size_t i = 0; i < jpeg->num_quantization_tables; i++)
+		{
+			free(jpeg->quantization_tables[i].data);
+			jpeg->quantization_tables[i].data = NULL;
+		}
+
+		free(jpeg->quantization_tables);
+		jpeg->quantization_tables = NULL;
 	}
 }
 
@@ -95,11 +112,57 @@ int load_segment(JPEG* jpeg, FILE* fp)
 			DEBUG_LOG("SOI marker encountered");
 			break;
 
+		case 0xDB:	// Quantization table
+			return load_quantization_table(jpeg, fp);
+
 		default:
 			fprintf(stderr, "Unimplemented marker 0xFF 0x%02X\n", segment_marker[1]);
 			return 1;
 		}
 	}
+
+	return 0;
+}
+
+int load_quantization_table(JPEG* jpeg, FILE* fp)
+{
+	DEBUG_LOG("DQT encountered");
+
+	if (jpeg->quantization_tables == NULL)
+	{
+		jpeg->quantization_tables = (QuantizationTable*)malloc(sizeof(QuantizationTable) * MAX_QUANTIZATION_TABLES);
+		if (jpeg->quantization_tables == NULL)
+		{
+			fprintf(stderr, "Failed to allocate memory for quantization tables\n");
+			return 1;
+		}
+	}
+
+	QuantizationTable* current_table = jpeg->quantization_tables + jpeg->num_quantization_tables;
+	if (fread(&current_table->length, sizeof(uint8_t), sizeof(uint16_t), fp) != sizeof(uint16_t))
+	{
+		fprintf(stderr, "Failed to read quantization table length\n");
+		return 1;
+	}
+
+	jpeg->num_quantization_tables++;
+	current_table->length = bswap_16(current_table->length) - 2;
+	DEBUG_LOG("qt length = %u", current_table->length);
+	
+	current_table->data = (uint8_t*)malloc(sizeof(uint8_t) * current_table->length);
+	if (current_table->data == NULL)
+	{
+		fprintf(stderr, "Failed to allocate memory for quantization table data\n");
+		return 1;
+	}
+
+	size_t tmp = fread(current_table->data, sizeof(uint8_t), current_table->length, fp);
+	if (tmp != current_table->length)
+	{
+		fprintf(stderr, "Failed to read quantization table data\n");
+		return 1;
+	}
+
 
 	return 0;
 }
@@ -176,12 +239,12 @@ int load_app0_segment(JPEG* jpeg, FILE* fp)
 
 	DEBUG_LOG(
 		"JFIFAPP0Segment\n"
-		"length = %u\n"
-		"identifier = %s\n"
-		"version = %u.%02u\n"
-		"density units = %u\n"
-		"density x, y = %u, %u\n"
-		"thumbnail x, y = %u, %u",
+		"\tlength = %u\n"
+		"\tidentifier = %s\n"
+		"\tversion = %u.%02u\n"
+		"\tdensity units = %u\n"
+		"\tdensity x, y = %u, %u\n"
+		"\tthumbnail x, y = %u, %u",
 		jpeg->app0->length,
 		jpeg->app0->identifier,
 		jpeg->app0->version.major, jpeg->app0->version.minor,

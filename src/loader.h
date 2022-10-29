@@ -4,6 +4,14 @@
 #include <stdint.h>
 #include "util.h"
 
+PACK(
+typedef struct QuantizationTable
+{
+	uint16_t length;
+	uint8_t* data;
+} QuantizationTable;
+)
+
 PACK (
 typedef struct JFIFAPP0Segment
 {
@@ -29,6 +37,9 @@ typedef struct JFIFAPP0Segment
 typedef struct JPEG
 {
 	JFIFAPP0Segment* app0;
+
+	size_t num_quantization_tables;
+	QuantizationTable* quantization_tables;
 } JPEG;
 
 JPEG* load_jpeg(const char* filename);
