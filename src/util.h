@@ -3,6 +3,8 @@
 
 #include <stdio.h>
 
+#define ERROR_LOG(...) fprintf(stderr, "[ERROR] "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n");
+
 #ifdef NDEBUG
 	#define DEBUG_LOG
 #else

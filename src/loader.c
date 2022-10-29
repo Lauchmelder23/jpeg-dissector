@@ -5,6 +5,7 @@
 #include <assert.h>
 
 #define MAX_QUANTIZATION_TABLES 255
+#define MAX_HUFFMAN_TABLES 255
 
 #define memzero(buffer, size) memset(buffer, 0, size)
 
@@ -34,7 +35,7 @@ JPEG* load_jpeg(const char* filename)
 	{
 		if (load_segment(jpeg, fp) != 0)
 		{
-			fprintf(stderr, "Segment loading failed\n");
+			ERROR_LOG("Segment loading failed");
 			free_jpeg(jpeg);
 
 			return NULL;
@@ -82,13 +83,13 @@ int load_segment(JPEG* jpeg, FILE* fp)
 
 	if (fread(segment_marker, sizeof(uint8_t), segment_marker_size, fp) != segment_marker_size)
 	{
-		fprintf(stderr, "Marker terminated unexpectedly\n");
+		ERROR_LOG("Marker terminated unexpectedly");
 		return 1;
 	}
 
 	if (segment_marker[0] != 0xFF)
 	{
-		fprintf(stderr, "Ill-formatted marker\n");
+		ERROR_LOG("Ill-formatted marker");
 		return 1;
 	}
 
@@ -128,7 +129,7 @@ int load_segment(JPEG* jpeg, FILE* fp)
 			return load_quantization_table(jpeg, fp);
 
 		default:
-			fprintf(stderr, "Unimplemented marker 0xFF 0x%02X\n", segment_marker[1]);
+			ERROR_LOG("Unimplemented marker 0xFF 0x%02X", segment_marker[1]);
 			return 1;
 		}
 	}
@@ -148,7 +149,7 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 		jpeg->quantization_tables = (QuantizationTable*)malloc(sizeof(QuantizationTable) * MAX_QUANTIZATION_TABLES);
 		if (jpeg->quantization_tables == NULL)
 		{
-			fprintf(stderr, "Failed to allocate memory for quantization tables\n");
+			ERROR_LOG("Failed to allocate memory for quantization tables");
 			return 1;
 		}
 	}
@@ -156,7 +157,7 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 	uint16_t total_length;
 	if (fread(&total_length, sizeof(uint8_t), sizeof(uint16_t), fp) != sizeof(uint16_t))
 	{
-		fprintf(stderr, "Failed to read length of quantization tables\n");
+		ERROR_LOG("Failed to read length of quantization tables");
 		return 1;
 	}
 
@@ -170,19 +171,21 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 		uint8_t meta_info;
 		if (fread(&meta_info, sizeof(uint8_t), sizeof(uint8_t), fp) != sizeof(uint8_t))
 		{
-			fprintf(stderr, "Failed to read quantization table #%d meta info\n", jpeg->num_quantization_tables);
+			ERROR_LOG("Failed to read quantization table #%d meta info", jpeg->num_quantization_tables);
 			return 1;
 		}
 
-		current_table->precision = ((meta_info & 0xF) == 0) ? 8 : 16;
-		current_table->destination = (meta_info >> 4);
+		read_length += 1;
+
+		current_table->precision = ((meta_info >> 4) == 0) ? sizeof(uint8_t) : sizeof(uint16_t);
+		current_table->destination = meta_info & 0x0F;
 
 		size_t table_length = current_table->precision * 64;
 
 		DEBUG_LOG(
 			"Quantization table #%d\n"
 			"\tprecision = %d bit\n"
-			"\tdestination = %d\n", 
+			"\tdestination = %d", 
 			
 			jpeg->num_quantization_tables,
 			current_table->precision,
@@ -192,13 +195,13 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 		current_table->data = (uint8_t*)malloc(table_length);
 		if (current_table->data == NULL)
 		{
-			fprintf(stderr, "Failed to allocate memory for quantization table #%d data\n", jpeg->num_quantization_tables);
+			ERROR_LOG("Failed to allocate memory for quantization table #%d data", jpeg->num_quantization_tables);
 			return 1;
 		}
 
 		if (fread(current_table->data, sizeof(uint8_t), table_length, fp) != table_length)
 		{
-			fprintf(stderr, "Failed to read quantization table #%d data\n", jpeg->num_quantization_tables);
+			ERROR_LOG("Failed to read quantization table #%d data", jpeg->num_quantization_tables);
 			return 1;
 		}
 
@@ -216,7 +219,91 @@ int load_huffman_table(JPEG* jpeg, FILE* fp)
 	assert(jpeg);
 	assert(fp);
 
-	return 1;
+	if (jpeg->huffman_tables == NULL)
+	{
+		jpeg->huffman_tables = (HuffmanTable*)malloc(sizeof(HuffmanTable) * MAX_HUFFMAN_TABLES);
+		if (jpeg->huffman_tables == NULL)
+		{
+			ERROR_LOG("Failed to allocate memory for huffman tables");
+			return 1;
+		}
+	}
+
+	size_t total_length;
+	if (fread(&total_length, sizeof(uint8_t), sizeof(uint16_t), fp) != sizeof(uint16_t))
+	{
+		ERROR_LOG("Failed to read length of huffman tables");
+		return 1;
+	}
+
+	total_length = bswap_16(total_length);
+	size_t read_length = 2;
+
+	while (read_length < total_length)
+	{
+		HuffmanTable* current_table = jpeg->huffman_tables + jpeg->num_huffman_tables;
+		
+		uint8_t meta_info;
+		if (fread(&meta_info, sizeof(uint8_t), sizeof(uint8_t), fp) != sizeof(uint8_t))
+		{
+			ERROR_LOG("Failed to read huffman table #%d meta info", jpeg->num_huffman_tables);
+			return 1;
+		}
+
+		read_length += 1;
+
+		current_table->class = ((meta_info >> 4) == 0) ? DCTable : ACTable;
+		current_table->destination = meta_info & 0x0F;
+
+		if (fread(current_table->num_codes, sizeof(uint8_t), 16, fp) != 16)
+		{
+			ERROR_LOG("Failed to read huffman code lengths for table #%d", jpeg->num_huffman_tables);
+			return 1;
+		}
+
+		read_length += 16;
+
+		DEBUG_LOG(
+			"Huffman table #%d\n"
+			"\tclass = %s\n"
+			"\tdestination = %d\n"
+			"\tcode lengths = %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d",
+
+			jpeg->num_huffman_tables,
+			(current_table->class == DCTable) ? "DC" : "AC",
+			current_table->destination,
+			current_table->num_codes[0], current_table->num_codes[1], current_table->num_codes[2], current_table->num_codes[3],
+			current_table->num_codes[4], current_table->num_codes[5], current_table->num_codes[6], current_table->num_codes[7],
+			current_table->num_codes[8], current_table->num_codes[9], current_table->num_codes[10], current_table->num_codes[11],
+			current_table->num_codes[12], current_table->num_codes[13], current_table->num_codes[14], current_table->num_codes[15]
+		);
+
+		for (size_t i = 0; i < 16; i++)
+		{
+			if (current_table->num_codes[i] == 0)
+			{
+				current_table->codes[i] = NULL;
+				continue;
+			}
+
+			current_table->codes[i] = (uint8_t*)malloc(sizeof(uint8_t) * current_table->num_codes[i]);
+			if (current_table->codes[i] == NULL)
+			{
+				ERROR_LOG("Failed to allocate memory for huffman table #%d list of codes of length %d", jpeg->num_huffman_tables, i);
+				return 1;
+			}
+
+			if (fread(current_table->codes[i], sizeof(uint8_t), current_table->num_codes[i], fp) != current_table->num_codes[i])
+			{
+				ERROR_LOG("Failed to read huffman codes of length %d for table #%d", i, jpeg->num_huffman_tables);
+				return 1;
+			}
+
+			read_length += current_table->num_codes[i];
+		}
+
+		jpeg->num_huffman_tables += 1;
+	}
 
 	return 0;
 }
@@ -230,20 +317,20 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 
 	if (jpeg->frame_header != NULL)
 	{
-		fprintf(stderr, "Found multiple frames\n");
+		ERROR_LOG("Found multiple frames");
 		return 1;
 	}
 
 	jpeg->frame_header = (FrameHeader*)malloc(sizeof(FrameHeader));
 	if (jpeg->frame_header == NULL)
 	{
-		fprintf(stderr, "Failed to allocate memory for frame header\n");
+		ERROR_LOG("Failed to allocate memory for frame header");
 		return 1;
 	}
 
 	if (fread(jpeg->frame_header, sizeof(uint8_t), FRAME_HEADER_SIZE, fp) != FRAME_HEADER_SIZE)
 	{
-		fprintf(stderr, "Failed to read data from frame header\n");
+		ERROR_LOG("Failed to read data from frame header");
 		return 1;
 	}
 
@@ -256,7 +343,7 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 	jpeg->frame_header->components = (FrameComponent*)malloc(sizeof(FrameComponent) * jpeg->frame_header->num_components);
 	if (jpeg->frame_header->components == NULL)
 	{
-		fprintf(stderr, "Failed to allocate memory for frame components\n");
+		ERROR_LOG("Failed to allocate memory for frame components");
 		return 1;
 	}
 
@@ -265,7 +352,7 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 		FrameComponent* current_component = jpeg->frame_header->components + c;
 		if (fread(current_component, sizeof(uint8_t), sizeof(FrameComponent), fp) != sizeof(FrameComponent))
 		{
-			fprintf(stderr, "Failed to read component #%u\n", c);
+			ERROR_LOG("Failed to read component #%u", c);
 			return 1;
 		}
 	}
@@ -276,7 +363,7 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 		"\tprecision = %d\n"
 		"\tlines, samples = %d, %d\n"
 		"\tcomponents = %d\n"
-		"\tencoding = %s %s, %s\n",
+		"\tencoding = %s %s, %s",
 
 		jpeg->frame_header->length,
 		jpeg->frame_header->precision,
@@ -309,7 +396,7 @@ int load_app_segment(JPEG* jpeg, FILE* fp, uint8_t n)
 	case 0:	return load_app0_segment(jpeg, fp);
 
 	default: 
-		fprintf(stderr, "Unknown APP segment ID %d\n", n);
+		ERROR_LOG("Unknown APP segment ID %d", n);
 		return 1;
 	}
 
@@ -320,7 +407,7 @@ int load_app0_segment(JPEG* jpeg, FILE* fp)
 {
 	if (jpeg->app0 != NULL)
 	{
-		fprintf(stderr, "Found more than one APP0 marker\n");
+		ERROR_LOG("Found more than one APP0 marker");
 		return 1;
 	}
 
@@ -332,14 +419,14 @@ int load_app0_segment(JPEG* jpeg, FILE* fp)
 
 	if (jpeg->app0 == NULL)
 	{
-		fprintf(stderr, "Failed to allocate memory for APP0 header\n");
+		ERROR_LOG("Failed to allocate memory for APP0 header");
 		return 1;
 	}
 
 	// Extract header without thumbnail data
 	if (fread(jpeg->app0, sizeof(uint8_t), JFIF_APP0_SIZE, fp) != JFIF_APP0_SIZE)
 	{
-		fprintf(stderr, "Incomplete APP0 header\n");
+		ERROR_LOG("Incomplete APP0 header");
 		return 1;
 	}
 
@@ -353,13 +440,13 @@ int load_app0_segment(JPEG* jpeg, FILE* fp)
 		jpeg->app0->thumbnail_data = (uint8_t*)malloc(thumbnail_data_size * sizeof(uint8_t));
 		if (jpeg->app0->thumbnail_data == NULL)
 		{
-			fprintf(stderr, "Failed to allocate memory for thumbnail data\n");
+			ERROR_LOG("Failed to allocate memory for thumbnail data");
 			return 1;
 		}
 
 		if (fread(jpeg->app0->thumbnail_data, sizeof(uint8_t), thumbnail_data_size, fp) != thumbnail_data_size)
 		{
-			fprintf(stderr, "Incomplete thumbnail data\n");
+			ERROR_LOG("Incomplete thumbnail data");
 			return 1;
 		}
 	}

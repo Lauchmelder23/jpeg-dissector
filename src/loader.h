@@ -28,6 +28,12 @@ typedef enum DCTType
 	Differential = (1 << 2)
 } DCTType;
 
+typedef enum TableClass
+{
+	DCTable,
+	ACTable
+} TableClass;
+
 PACK(
 typedef struct QuantizationTable
 {
@@ -35,6 +41,16 @@ typedef struct QuantizationTable
 	uint8_t destination;
 	uint8_t* data;
 } QuantizationTable;
+)
+
+PACK(
+typedef struct HuffmanTable
+{
+	TableClass class;
+	uint8_t destination;
+	uint8_t num_codes[16];
+	uint8_t* codes[16];
+} HuffmanTable;
 )
 
 #define QUANTIZATION_TABLE_SIZE sizeof(QuantizationTable) - sizeof(uint8_t*)
@@ -98,6 +114,9 @@ typedef struct JPEG
 
 	size_t num_quantization_tables;
 	QuantizationTable* quantization_tables;
+
+	size_t num_huffman_tables;
+	HuffmanTable* huffman_tables;
 
 	FrameHeader* frame_header;
 } JPEG;
