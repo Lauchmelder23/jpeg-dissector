@@ -4,13 +4,69 @@
 #include <stdint.h>
 #include "util.h"
 
+#define ENCODING_PROCESS_MASK 3
+#define ENCODING_DCT_MASK 4
+#define ENCODING_CODING_MASK 8
+
+typedef enum EncodingProcess
+{
+	Baseline = 0,
+	Extended = 1,
+	Progressive = 2,
+	Lossless = 3,
+} EncodingProcess;
+
+typedef enum Coding
+{
+	Huffman = 0,
+	Arithmetic = (1 << 3)
+} Coding;
+
+typedef enum DCTType
+{
+	NonDifferential = 0,
+	Differential = (1 << 2)
+} DCTType;
+
 PACK(
 typedef struct QuantizationTable
 {
-	uint16_t length;
+	uint8_t precision;
+	uint8_t destination;
 	uint8_t* data;
 } QuantizationTable;
 )
+
+#define QUANTIZATION_TABLE_SIZE sizeof(QuantizationTable) - sizeof(uint8_t*)
+
+PACK(
+typedef struct FrameComponent
+{
+	uint8_t identifier;
+	struct
+	{
+		uint8_t v : 4;
+		uint8_t h : 4;
+	} sampling_factor;
+	uint8_t quantization_table;
+} FrameComponent;
+)
+
+PACK(
+typedef struct FrameHeader
+{
+	uint16_t length;
+	uint8_t precision;
+	uint16_t num_lines;
+	uint16_t num_samples;
+	uint8_t num_components;
+
+	uint8_t encoding;
+	FrameComponent* components;
+} FrameHeader;
+)
+
+#define FRAME_HEADER_SIZE sizeof(FrameHeader) - (sizeof(FrameComponent*) + sizeof(uint8_t))
 
 PACK (
 typedef struct JFIFAPP0Segment
@@ -34,12 +90,16 @@ typedef struct JFIFAPP0Segment
 } JFIFAPP0Segment;
 )
 
+#define JFIF_APP0_SIZE sizeof(JFIFAPP0Segment) - sizeof(uint8_t*)
+
 typedef struct JPEG
 {
 	JFIFAPP0Segment* app0;
 
 	size_t num_quantization_tables;
 	QuantizationTable* quantization_tables;
+
+	FrameHeader* frame_header;
 } JPEG;
 
 JPEG* load_jpeg(const char* filename);

@@ -11,6 +11,9 @@
 static int load_segment(JPEG* jpeg, FILE* fp);
 
 static int load_quantization_table(JPEG* jpeg, FILE* fp);
+static int load_huffman_table(JPEG* jpeg, FILE* fp);
+static int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type);
+
 static int load_rst_segment(JPEG* jpeg, FILE* fp, uint8_t n);
 static int load_app_segment(JPEG* jpeg, FILE* fp, uint8_t n);
 
@@ -108,6 +111,15 @@ int load_segment(JPEG* jpeg, FILE* fp)
 	{
 		switch (segment_marker[1])
 		{
+		case 0xC0: case 0xC1: case 0xC2: case 0xC3:
+		case 0xC5: case 0xC6: case 0xC7:
+		case 0xC9: case 0xCA: case 0xCB: 
+		case 0xCD: case 0xCE: case 0xCF:
+			return load_start_of_frame(jpeg, fp, segment_marker[1] & 0x0F);
+
+		case 0xC4:
+			return load_huffman_table(jpeg, fp);
+
 		case 0xD8:	// Start of image
 			DEBUG_LOG("SOI marker encountered");
 			break;
@@ -128,6 +140,9 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 {
 	DEBUG_LOG("DQT encountered");
 
+	assert(jpeg);
+	assert(fp);
+
 	if (jpeg->quantization_tables == NULL)
 	{
 		jpeg->quantization_tables = (QuantizationTable*)malloc(sizeof(QuantizationTable) * MAX_QUANTIZATION_TABLES);
@@ -138,31 +153,143 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 		}
 	}
 
-	QuantizationTable* current_table = jpeg->quantization_tables + jpeg->num_quantization_tables;
-	if (fread(&current_table->length, sizeof(uint8_t), sizeof(uint16_t), fp) != sizeof(uint16_t))
+	uint16_t total_length;
+	if (fread(&total_length, sizeof(uint8_t), sizeof(uint16_t), fp) != sizeof(uint16_t))
 	{
-		fprintf(stderr, "Failed to read quantization table length\n");
+		fprintf(stderr, "Failed to read length of quantization tables\n");
 		return 1;
 	}
 
-	jpeg->num_quantization_tables++;
-	current_table->length = bswap_16(current_table->length) - 2;
-	DEBUG_LOG("qt length = %u", current_table->length);
-	
-	current_table->data = (uint8_t*)malloc(sizeof(uint8_t) * current_table->length);
-	if (current_table->data == NULL)
+	total_length = bswap_16(total_length);
+	size_t read_length = 2;
+
+	while (read_length < total_length)
 	{
-		fprintf(stderr, "Failed to allocate memory for quantization table data\n");
+		QuantizationTable* current_table = jpeg->quantization_tables + jpeg->num_quantization_tables;
+
+		uint8_t meta_info;
+		if (fread(&meta_info, sizeof(uint8_t), sizeof(uint8_t), fp) != sizeof(uint8_t))
+		{
+			fprintf(stderr, "Failed to read quantization table #%d meta info\n", jpeg->num_quantization_tables);
+			return 1;
+		}
+
+		current_table->precision = ((meta_info & 0xF) == 0) ? 8 : 16;
+		current_table->destination = (meta_info >> 4);
+
+		size_t table_length = current_table->precision * 64;
+
+		DEBUG_LOG(
+			"Quantization table #%d\n"
+			"\tprecision = %d bit\n"
+			"\tdestination = %d\n", 
+			
+			jpeg->num_quantization_tables,
+			current_table->precision,
+			current_table->destination
+		);
+
+		current_table->data = (uint8_t*)malloc(table_length);
+		if (current_table->data == NULL)
+		{
+			fprintf(stderr, "Failed to allocate memory for quantization table #%d data\n", jpeg->num_quantization_tables);
+			return 1;
+		}
+
+		if (fread(current_table->data, sizeof(uint8_t), table_length, fp) != table_length)
+		{
+			fprintf(stderr, "Failed to read quantization table #%d data\n", jpeg->num_quantization_tables);
+			return 1;
+		}
+
+		jpeg->num_quantization_tables++;
+		read_length += table_length;
+	}
+
+	return 0;
+}
+
+int load_huffman_table(JPEG* jpeg, FILE* fp)
+{
+	DEBUG_LOG("DHT encountered");
+
+	assert(jpeg);
+	assert(fp);
+
+	return 1;
+
+	return 0;
+}
+
+int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
+{
+	DEBUG_LOG("SOF%u encountered", type);
+
+	assert(jpeg);
+	assert(fp);
+
+	if (jpeg->frame_header != NULL)
+	{
+		fprintf(stderr, "Found multiple frames\n");
 		return 1;
 	}
 
-	size_t tmp = fread(current_table->data, sizeof(uint8_t), current_table->length, fp);
-	if (tmp != current_table->length)
+	jpeg->frame_header = (FrameHeader*)malloc(sizeof(FrameHeader));
+	if (jpeg->frame_header == NULL)
 	{
-		fprintf(stderr, "Failed to read quantization table data\n");
+		fprintf(stderr, "Failed to allocate memory for frame header\n");
 		return 1;
 	}
 
+	if (fread(jpeg->frame_header, sizeof(uint8_t), FRAME_HEADER_SIZE, fp) != FRAME_HEADER_SIZE)
+	{
+		fprintf(stderr, "Failed to read data from frame header\n");
+		return 1;
+	}
+
+	jpeg->frame_header->length = bswap_16(jpeg->frame_header->length);
+	jpeg->frame_header->num_lines = bswap_16(jpeg->frame_header->num_lines);
+	jpeg->frame_header->num_samples = bswap_16(jpeg->frame_header->num_samples);
+
+	jpeg->frame_header->encoding = type;
+
+	jpeg->frame_header->components = (FrameComponent*)malloc(sizeof(FrameComponent) * jpeg->frame_header->num_components);
+	if (jpeg->frame_header->components == NULL)
+	{
+		fprintf(stderr, "Failed to allocate memory for frame components\n");
+		return 1;
+	}
+
+	for (size_t c = 0; c < jpeg->frame_header->num_components; c++)
+	{
+		FrameComponent* current_component = jpeg->frame_header->components + c;
+		if (fread(current_component, sizeof(uint8_t), sizeof(FrameComponent), fp) != sizeof(FrameComponent))
+		{
+			fprintf(stderr, "Failed to read component #%u\n", c);
+			return 1;
+		}
+	}
+
+	DEBUG_LOG(
+		"Frame header\n"
+		"\tlength = %d\n"
+		"\tprecision = %d\n"
+		"\tlines, samples = %d, %d\n"
+		"\tcomponents = %d\n"
+		"\tencoding = %s %s, %s\n",
+
+		jpeg->frame_header->length,
+		jpeg->frame_header->precision,
+		jpeg->frame_header->num_lines, jpeg->frame_header->num_samples,
+		jpeg->frame_header->num_components,
+		(jpeg->frame_header->encoding & ENCODING_DCT_MASK) == NonDifferential ? "Non-differential" : "Differential",
+
+		(jpeg->frame_header->encoding & ENCODING_PROCESS_MASK) == Baseline ? "baseline DCT" :
+		(jpeg->frame_header->encoding & ENCODING_PROCESS_MASK) == Extended ? "extended sequential DCT" :
+		(jpeg->frame_header->encoding & ENCODING_PROCESS_MASK) == Progressive ? "progressive DCT" : "Lossless (sequential)",
+
+		(jpeg->frame_header->encoding & ENCODING_CODING_MASK) == Huffman ? "huffman coding" : "arithmetic coding"
+	);
 
 	return 0;
 }
@@ -197,6 +324,7 @@ int load_app0_segment(JPEG* jpeg, FILE* fp)
 		return 1;
 	}
 
+	assert(jpeg);
 	assert(fp);
 
 	jpeg->app0 = (JFIFAPP0Segment*)malloc(sizeof(JFIFAPP0Segment));
@@ -209,8 +337,7 @@ int load_app0_segment(JPEG* jpeg, FILE* fp)
 	}
 
 	// Extract header without thumbnail data
-	size_t jfif_header_size = sizeof(JFIFAPP0Segment) - sizeof(uint8_t*);
-	if (fread(jpeg->app0, sizeof(uint8_t), jfif_header_size, fp) != jfif_header_size)
+	if (fread(jpeg->app0, sizeof(uint8_t), JFIF_APP0_SIZE, fp) != JFIF_APP0_SIZE)
 	{
 		fprintf(stderr, "Incomplete APP0 header\n");
 		return 1;
