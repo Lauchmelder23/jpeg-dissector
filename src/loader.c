@@ -32,7 +32,7 @@ JPEG* load_jpeg(const char* filename)
 		return NULL;
 	}
 
-	JPEG* jpeg = (JPEG*)malloc(sizeof(jpeg));
+	JPEG* jpeg = (JPEG*)malloc(sizeof(JPEG));
 	memzero(jpeg, sizeof(JPEG));
 
 	while (!feof(fp))
@@ -42,6 +42,7 @@ JPEG* load_jpeg(const char* filename)
 			ERROR_LOG("Segment loading failed");
 			free_jpeg(jpeg);
 
+			fclose(fp);
 			return NULL;
 		}
 	}
@@ -71,8 +72,11 @@ void free_jpeg(JPEG* jpeg)
 	{
 		for (size_t i = 0; i < jpeg->num_quantization_tables; i++)
 		{
-			free(jpeg->quantization_tables[i].data);
-			jpeg->quantization_tables[i].data = NULL;
+			if (jpeg->quantization_tables[i].data)
+			{
+				free(jpeg->quantization_tables[i].data);
+				jpeg->quantization_tables[i].data = NULL;
+			}
 		}
 
 		free(jpeg->quantization_tables);
@@ -85,7 +89,11 @@ void free_jpeg(JPEG* jpeg)
 		{
 			for (size_t j = 0; j < 16; j++)
 			{
-				free(jpeg->huffman_tables[i].codes[j]);
+				if (jpeg->huffman_tables[i].codes[j])
+				{
+					free(jpeg->huffman_tables[i].codes[j]);
+					jpeg->huffman_tables[i].codes[j] = NULL;
+				}
 			}
 		}
 
@@ -116,6 +124,22 @@ void free_jpeg(JPEG* jpeg)
 		free(jpeg->scan_header);
 		jpeg->scan_header = NULL;
 	}
+
+	if (jpeg->scans)
+	{
+		for (size_t i = 0; i < jpeg->num_scans; i++)
+		{
+			free(jpeg->scans[i].data);
+			jpeg->scans[i].data = NULL;
+			jpeg->scans[i].scan_component = NULL;
+			jpeg->scans[i].frame_component = NULL;
+		}
+
+		free(jpeg->scans);
+		jpeg->scans = NULL;
+	}
+
+	free(jpeg);
 }
 
 int load_segment(JPEG* jpeg, FILE* fp)
@@ -213,6 +237,7 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 	while (read_length < total_length)
 	{
 		struct QuantizationTable* current_table = jpeg->quantization_tables + jpeg->num_quantization_tables;
+		jpeg->num_quantization_tables++;
 
 		uint8_t meta_info;
 		if (fread(&meta_info, sizeof(uint8_t), sizeof(uint8_t), fp) != sizeof(uint8_t))
@@ -251,7 +276,6 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 			return 1;
 		}
 
-		jpeg->num_quantization_tables++;
 		read_length += table_length;
 	}
 
@@ -288,7 +312,8 @@ int load_huffman_table(JPEG* jpeg, FILE* fp)
 	while (read_length < total_length)
 	{
 		struct HuffmanTable* current_table = jpeg->huffman_tables + jpeg->num_huffman_tables;
-		
+		jpeg->num_huffman_tables++;
+
 		uint8_t meta_info;
 		if (fread(&meta_info, sizeof(uint8_t), sizeof(uint8_t), fp) != sizeof(uint8_t))
 		{
@@ -347,8 +372,6 @@ int load_huffman_table(JPEG* jpeg, FILE* fp)
 
 			read_length += current_table->num_codes[i];
 		}
-
-		jpeg->num_huffman_tables += 1;
 	}
 
 	return 0;
@@ -588,6 +611,8 @@ int load_scan_data(JPEG* jpeg, FILE* fp, struct ScanComponent* scan_component)
 		return 1;
 	}
 
+	jpeg->num_scans++;
+
 	size_t tmp = fread(scan->data, sizeof(uint8_t), scan->length, fp);
 	if (tmp != scan->length)
 	{
@@ -595,8 +620,6 @@ int load_scan_data(JPEG* jpeg, FILE* fp, struct ScanComponent* scan_component)
 		return 1;
 	}
 
-
-	jpeg->num_scans++;
 	return 0;
 }
 
