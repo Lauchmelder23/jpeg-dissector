@@ -12,12 +12,9 @@
 #endif
 
 #if defined(__GNUC__)
-	#define PACK( data ) data __attribute((__packed__))
+	#define PACK( data ) data __attribute__((__packed__))
 
 	#include <byteswap.h>
-	#define bswap_16 bswap_16
-	#define bswap_32 bswap_32
-	#define bswap_64 bswap_64
 #elif defined(_MSC_VER)
 	#define PACK( data ) __pragma(pack(push, 1)) data __pragma(pack(pop))
 

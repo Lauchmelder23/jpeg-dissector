@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <memory.h>
 #include <assert.h>
+#include <math.h>
 
 #define MAX_QUANTIZATION_TABLES 255
 #define MAX_HUFFMAN_TABLES 255
@@ -14,6 +15,9 @@ static int load_segment(JPEG* jpeg, FILE* fp);
 static int load_quantization_table(JPEG* jpeg, FILE* fp);
 static int load_huffman_table(JPEG* jpeg, FILE* fp);
 static int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type);
+static int load_start_of_scan(JPEG* jpeg, FILE* fp);
+
+static int load_scan_data(JPEG* jpeg, FILE* fp, struct ScanComponent* scan_component);
 
 static int load_rst_segment(JPEG* jpeg, FILE* fp, uint8_t n);
 static int load_app_segment(JPEG* jpeg, FILE* fp, uint8_t n);
@@ -74,6 +78,44 @@ void free_jpeg(JPEG* jpeg)
 		free(jpeg->quantization_tables);
 		jpeg->quantization_tables = NULL;
 	}
+
+	if (jpeg->huffman_tables)
+	{
+		for (size_t i = 0; i < jpeg->num_huffman_tables; i++)
+		{
+			for (size_t j = 0; j < 16; j++)
+			{
+				free(jpeg->huffman_tables[i].codes[j]);
+			}
+		}
+
+		free(jpeg->huffman_tables);
+		jpeg->huffman_tables = NULL;
+	}
+
+	if (jpeg->frame_header)
+	{
+		if (jpeg->frame_header->components)
+		{
+			free(jpeg->frame_header->components);
+			jpeg->frame_header->components = NULL;
+		}
+
+		free(jpeg->frame_header);
+		jpeg->frame_header = NULL;
+	}
+
+	if (jpeg->scan_header)
+	{
+		if (jpeg->scan_header->components)
+		{
+			free(jpeg->scan_header->components);
+			jpeg->scan_header->components = NULL;
+		}
+
+		free(jpeg->scan_header);
+		jpeg->scan_header = NULL;
+	}
 }
 
 int load_segment(JPEG* jpeg, FILE* fp)
@@ -125,6 +167,9 @@ int load_segment(JPEG* jpeg, FILE* fp)
 			DEBUG_LOG("SOI marker encountered");
 			break;
 
+		case 0xDA:
+			return load_start_of_scan(jpeg, fp);
+
 		case 0xDB:	// Quantization table
 			return load_quantization_table(jpeg, fp);
 
@@ -146,13 +191,14 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 
 	if (jpeg->quantization_tables == NULL)
 	{
-		jpeg->quantization_tables = (QuantizationTable*)malloc(sizeof(QuantizationTable) * MAX_QUANTIZATION_TABLES);
+		jpeg->quantization_tables = (struct QuantizationTable*)malloc(sizeof(struct QuantizationTable) * MAX_QUANTIZATION_TABLES);
 		if (jpeg->quantization_tables == NULL)
 		{
 			ERROR_LOG("Failed to allocate memory for quantization tables");
 			return 1;
 		}
 	}
+
 
 	uint16_t total_length;
 	if (fread(&total_length, sizeof(uint8_t), sizeof(uint16_t), fp) != sizeof(uint16_t))
@@ -166,12 +212,12 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 
 	while (read_length < total_length)
 	{
-		QuantizationTable* current_table = jpeg->quantization_tables + jpeg->num_quantization_tables;
+		struct QuantizationTable* current_table = jpeg->quantization_tables + jpeg->num_quantization_tables;
 
 		uint8_t meta_info;
 		if (fread(&meta_info, sizeof(uint8_t), sizeof(uint8_t), fp) != sizeof(uint8_t))
 		{
-			ERROR_LOG("Failed to read quantization table #%d meta info", jpeg->num_quantization_tables);
+			ERROR_LOG("Failed to read quantization table #%zu meta info", jpeg->num_quantization_tables);
 			return 1;
 		}
 
@@ -183,7 +229,7 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 		size_t table_length = current_table->precision * 64;
 
 		DEBUG_LOG(
-			"Quantization table #%d\n"
+			"Quantization table #%zu\n"
 			"\tprecision = %d bit\n"
 			"\tdestination = %d", 
 			
@@ -195,13 +241,13 @@ int load_quantization_table(JPEG* jpeg, FILE* fp)
 		current_table->data = (uint8_t*)malloc(table_length);
 		if (current_table->data == NULL)
 		{
-			ERROR_LOG("Failed to allocate memory for quantization table #%d data", jpeg->num_quantization_tables);
+			ERROR_LOG("Failed to allocate memory for quantization table #%zu data", jpeg->num_quantization_tables);
 			return 1;
 		}
 
 		if (fread(current_table->data, sizeof(uint8_t), table_length, fp) != table_length)
 		{
-			ERROR_LOG("Failed to read quantization table #%d data", jpeg->num_quantization_tables);
+			ERROR_LOG("Failed to read quantization table #%zu data", jpeg->num_quantization_tables);
 			return 1;
 		}
 
@@ -221,7 +267,7 @@ int load_huffman_table(JPEG* jpeg, FILE* fp)
 
 	if (jpeg->huffman_tables == NULL)
 	{
-		jpeg->huffman_tables = (HuffmanTable*)malloc(sizeof(HuffmanTable) * MAX_HUFFMAN_TABLES);
+		jpeg->huffman_tables = (struct HuffmanTable*)malloc(sizeof(struct HuffmanTable) * MAX_HUFFMAN_TABLES);
 		if (jpeg->huffman_tables == NULL)
 		{
 			ERROR_LOG("Failed to allocate memory for huffman tables");
@@ -241,12 +287,12 @@ int load_huffman_table(JPEG* jpeg, FILE* fp)
 
 	while (read_length < total_length)
 	{
-		HuffmanTable* current_table = jpeg->huffman_tables + jpeg->num_huffman_tables;
+		struct HuffmanTable* current_table = jpeg->huffman_tables + jpeg->num_huffman_tables;
 		
 		uint8_t meta_info;
 		if (fread(&meta_info, sizeof(uint8_t), sizeof(uint8_t), fp) != sizeof(uint8_t))
 		{
-			ERROR_LOG("Failed to read huffman table #%d meta info", jpeg->num_huffman_tables);
+			ERROR_LOG("Failed to read huffman table #%zu meta info", jpeg->num_huffman_tables);
 			return 1;
 		}
 
@@ -257,14 +303,14 @@ int load_huffman_table(JPEG* jpeg, FILE* fp)
 
 		if (fread(current_table->num_codes, sizeof(uint8_t), 16, fp) != 16)
 		{
-			ERROR_LOG("Failed to read huffman code lengths for table #%d", jpeg->num_huffman_tables);
+			ERROR_LOG("Failed to read huffman code lengths for table #%zu", jpeg->num_huffman_tables);
 			return 1;
 		}
 
 		read_length += 16;
 
 		DEBUG_LOG(
-			"Huffman table #%d\n"
+			"Huffman table #%zu\n"
 			"\tclass = %s\n"
 			"\tdestination = %d\n"
 			"\tcode lengths = %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d, %d",
@@ -289,13 +335,13 @@ int load_huffman_table(JPEG* jpeg, FILE* fp)
 			current_table->codes[i] = (uint8_t*)malloc(sizeof(uint8_t) * current_table->num_codes[i]);
 			if (current_table->codes[i] == NULL)
 			{
-				ERROR_LOG("Failed to allocate memory for huffman table #%d list of codes of length %d", jpeg->num_huffman_tables, i);
+				ERROR_LOG("Failed to allocate memory for huffman table #%zu list of codes of length %zu", jpeg->num_huffman_tables, i);
 				return 1;
 			}
 
 			if (fread(current_table->codes[i], sizeof(uint8_t), current_table->num_codes[i], fp) != current_table->num_codes[i])
 			{
-				ERROR_LOG("Failed to read huffman codes of length %d for table #%d", i, jpeg->num_huffman_tables);
+				ERROR_LOG("Failed to read huffman codes of length %zu for table #%zu", i, jpeg->num_huffman_tables);
 				return 1;
 			}
 
@@ -321,12 +367,14 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 		return 1;
 	}
 
-	jpeg->frame_header = (FrameHeader*)malloc(sizeof(FrameHeader));
+	jpeg->frame_header = (struct FrameHeader*)malloc(sizeof(struct FrameHeader));
 	if (jpeg->frame_header == NULL)
 	{
 		ERROR_LOG("Failed to allocate memory for frame header");
 		return 1;
 	}
+
+	memzero(jpeg->frame_header, sizeof(struct FrameHeader));
 
 	if (fread(jpeg->frame_header, sizeof(uint8_t), FRAME_HEADER_SIZE, fp) != FRAME_HEADER_SIZE)
 	{
@@ -340,7 +388,7 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 
 	jpeg->frame_header->encoding = type;
 
-	jpeg->frame_header->components = (FrameComponent*)malloc(sizeof(FrameComponent) * jpeg->frame_header->num_components);
+	jpeg->frame_header->components = (struct FrameComponent*)malloc(sizeof(struct FrameComponent) * jpeg->frame_header->num_components);
 	if (jpeg->frame_header->components == NULL)
 	{
 		ERROR_LOG("Failed to allocate memory for frame components");
@@ -349,12 +397,15 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 
 	for (size_t c = 0; c < jpeg->frame_header->num_components; c++)
 	{
-		FrameComponent* current_component = jpeg->frame_header->components + c;
-		if (fread(current_component, sizeof(uint8_t), sizeof(FrameComponent), fp) != sizeof(FrameComponent))
+		struct FrameComponent* current_component = jpeg->frame_header->components + c;
+		if (fread(current_component, sizeof(uint8_t), sizeof(struct FrameComponent), fp) != sizeof(struct FrameComponent))
 		{
-			ERROR_LOG("Failed to read component #%u", c);
+			ERROR_LOG("Failed to read component #%zu", c);
 			return 1;
 		}
+
+		jpeg->frame_header->max_sampling_factor.v = fmaxl(jpeg->frame_header->max_sampling_factor.v, current_component->sampling_factor.v);
+		jpeg->frame_header->max_sampling_factor.h = fmaxl(jpeg->frame_header->max_sampling_factor.h, current_component->sampling_factor.h);
 	}
 
 	DEBUG_LOG(
@@ -363,7 +414,8 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 		"\tprecision = %d\n"
 		"\tlines, samples = %d, %d\n"
 		"\tcomponents = %d\n"
-		"\tencoding = %s %s, %s",
+		"\tencoding = %s %s, %s\n"
+		"\tmax sampling factor v/h = %d/%d",
 
 		jpeg->frame_header->length,
 		jpeg->frame_header->precision,
@@ -375,9 +427,176 @@ int load_start_of_frame(JPEG* jpeg, FILE* fp, uint8_t type)
 		(jpeg->frame_header->encoding & ENCODING_PROCESS_MASK) == Extended ? "extended sequential DCT" :
 		(jpeg->frame_header->encoding & ENCODING_PROCESS_MASK) == Progressive ? "progressive DCT" : "Lossless (sequential)",
 
-		(jpeg->frame_header->encoding & ENCODING_CODING_MASK) == Huffman ? "huffman coding" : "arithmetic coding"
+		(jpeg->frame_header->encoding & ENCODING_CODING_MASK) == Huffman ? "huffman coding" : "arithmetic coding",
+	
+		jpeg->frame_header->max_sampling_factor.v, jpeg->frame_header->max_sampling_factor.h
 	);
 
+	for (size_t i = 0; i < jpeg->frame_header->num_components; i++)
+	{
+		DEBUG_LOG(
+			"Frame header component #%zu\n"
+			"\tid = %d\n"
+			"\tsampling factor v/h = %d/%d\n"
+			"\ttable = %d",
+
+			i,
+			jpeg->frame_header->components[i].identifier,
+			jpeg->frame_header->components[i].sampling_factor.v, jpeg->frame_header->components[i].sampling_factor.h,
+			jpeg->frame_header->components[i].quantization_table
+		);
+	}
+
+	return 0;
+}
+
+int load_start_of_scan(JPEG* jpeg, FILE* fp)
+{
+	DEBUG_LOG("SOS encountered");
+
+	assert(jpeg);
+	assert(fp);
+
+	if (jpeg->scan_header != NULL)
+	{
+		ERROR_LOG("Found multiple scans");
+		return 1;
+	}
+
+	jpeg->scan_header = (struct ScanHeader*)malloc(sizeof(struct ScanHeader));
+	if (jpeg->scan_header == NULL)
+	{
+		ERROR_LOG("Failed to allocate memory for scan header");
+		return 1;
+	}
+
+	if (fread(jpeg->scan_header, sizeof(uint8_t), SCAN_HEADER_PRE_SIZE, fp) != SCAN_HEADER_PRE_SIZE)
+	{
+		ERROR_LOG("Failed to read length of scan header or scan header components");
+		return 1;
+	}
+
+	jpeg->scan_header->length = bswap_16(jpeg->scan_header->length);
+
+	jpeg->scan_header->components = (struct ScanComponent*)malloc(sizeof(struct ScanComponent) * jpeg->scan_header->num_components);
+	if (jpeg->scan_header == NULL)
+	{
+		ERROR_LOG("Failed to allocate memory for scan header components");
+		return 1;
+	}
+
+	for (size_t i = 0; i < jpeg->scan_header->num_components; i++)
+	{
+		struct ScanComponent* current_component = jpeg->scan_header->components + i;
+
+		if (fread(current_component, sizeof(uint8_t), sizeof(struct ScanComponent), fp) != sizeof(struct ScanComponent))
+		{
+			ERROR_LOG("Failed to load component #%zu of scan header", i);
+			return 1;
+		}
+	}
+
+	if (fread(&jpeg->scan_header->spectral_select_start, sizeof(uint8_t), SCAN_HEADER_POST_SIZE, fp) != SCAN_HEADER_POST_SIZE)
+	{
+		ERROR_LOG("Failed to read spectral selection info");
+		return 1;
+	}
+
+	DEBUG_LOG(
+		"Scan header\n"
+		"\tcomponents = %d\n"
+		"\tspectral select s/e = %d/%d\n"
+		"\tapprox bit pos h/l = %d/%d",
+
+		jpeg->scan_header->num_components,
+		jpeg->scan_header->spectral_select_start, jpeg->scan_header->spectral_select_end,
+		jpeg->scan_header->approx_bit_pos.high, jpeg->scan_header->approx_bit_pos.low
+	);
+
+	jpeg->scans = (struct Scan*)malloc(sizeof(struct Scan) * jpeg->scan_header->num_components);
+	if (jpeg->scans == NULL)
+	{
+		ERROR_LOG("Failed to allocate memory for scan data");
+		return 1;
+	}
+
+	for (size_t i = 0; i < jpeg->scan_header->num_components; i++)
+	{
+		struct ScanComponent* scan_component = jpeg->scan_header->components + i;
+
+		DEBUG_LOG(
+			"Scan header component #%zu\n"
+			"\tid = %d\n"
+			"\tdestination dc/ac = %d/%d",
+
+			i,
+			scan_component->identifier,
+			scan_component->table_destination.dc, scan_component->table_destination.ac
+		);
+
+		if (load_scan_data(jpeg, fp, scan_component) != 0)
+		{
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+int load_scan_data(JPEG* jpeg, FILE* fp, struct ScanComponent* scan_component)
+{
+	DEBUG_LOG("Loading scan data (component #%d)", scan_component->identifier);
+
+	assert(jpeg);
+	assert(fp);
+
+	struct Scan* scan = jpeg->scans + jpeg->num_scans;
+
+	struct FrameComponent* frame_component = NULL;
+	for (size_t i = 0; i < jpeg->frame_header->num_components; i++)
+	{
+		if (jpeg->frame_header->components[i].identifier == scan_component->identifier)
+		{
+			frame_component = jpeg->frame_header->components + i;
+			break;
+		}
+	}
+
+	if (frame_component == NULL)
+	{
+		ERROR_LOG("Couldn't find matching frame component for scan component (%d)", scan_component->identifier);
+		return 1;
+	}
+
+	scan->scan_component = scan_component;
+	scan->frame_component = frame_component;
+
+	uint16_t lines = jpeg->frame_header->num_lines;
+	uint16_t samples = jpeg->frame_header->num_samples;
+
+	scan->width = ceill(samples * (float)frame_component->sampling_factor.h / (float)jpeg->frame_header->max_sampling_factor.h);
+	scan->height = ceill(lines * (float)frame_component->sampling_factor.v / (float)jpeg->frame_header->max_sampling_factor.v);
+	
+	DEBUG_LOG("size of scan (w,h) = %d,%d", scan->width, scan->height);
+
+	scan->length = (size_t)scan->width * scan->height;
+
+	scan->data = (uint8_t*)malloc(sizeof(uint8_t) * scan->length);
+	if (scan->data == NULL)
+	{
+		ERROR_LOG("Failed to allocate memory for scan data");
+		return 1;
+	}
+
+	size_t tmp = fread(scan->data, sizeof(uint8_t), scan->length, fp);
+	if (tmp != scan->length)
+	{
+		ERROR_LOG("Failed to load scan data from file");
+		return 1;
+	}
+
+
+	jpeg->num_scans++;
 	return 0;
 }
 
@@ -414,8 +633,8 @@ int load_app0_segment(JPEG* jpeg, FILE* fp)
 	assert(jpeg);
 	assert(fp);
 
-	jpeg->app0 = (JFIFAPP0Segment*)malloc(sizeof(JFIFAPP0Segment));
-	memzero(jpeg->app0, sizeof(JFIFAPP0Segment));
+	jpeg->app0 = (struct JFIFAPP0Segment*)malloc(sizeof(struct JFIFAPP0Segment));
+	memzero(jpeg->app0, sizeof(struct JFIFAPP0Segment));
 
 	if (jpeg->app0 == NULL)
 	{
